@@ -1,21 +1,18 @@
-# ==================================================
-# COMPARAÇÃO FISCAL X CONTÁBIL
-# ==================================================
-
 import streamlit as st
 import pandas as pd
 import re
+from io import BytesIO
 
 # ==================================================
-# CONFIG
+# CONFIGURAÇÃO
 # ==================================================
 
 st.set_page_config(
-    page_title="Conciliação Fiscal x Contábil",
+    page_title="Conciliação Fiscal x Razão Contábil",
     layout="wide"
 )
 
-st.title("📊 Conciliação Fiscal x Contábil")
+st.title("📊 Conciliação Fiscal x Razão Contábil")
 
 # ==================================================
 # LIMPAR VALORES
@@ -23,18 +20,35 @@ st.title("📊 Conciliação Fiscal x Contábil")
 
 def limpar_valor(coluna):
 
-    coluna = (
-        coluna.astype(str)
-        .str.replace(".", "", regex=False)
-        .str.replace(",", ".", regex=False)
-        .str.replace("R$", "", regex=False)
-        .str.strip()
+    coluna = coluna.astype(str)
+
+    coluna = coluna.str.strip()
+
+    coluna = coluna.str.replace(
+        "R$",
+        "",
+        regex=False
     )
 
-    return pd.to_numeric(
+    coluna = coluna.str.replace(
+        " ",
+        "",
+        regex=False
+    )
+
+    # troca vírgula por ponto
+    coluna = coluna.str.replace(
+        ",",
+        ".",
+        regex=False
+    )
+
+    coluna = pd.to_numeric(
         coluna,
         errors="coerce"
     )
+
+    return coluna.fillna(0).round(2)
 
 # ==================================================
 # EXTRAIR NOTA
@@ -44,95 +58,28 @@ def extrair_nota(texto):
 
     texto = str(texto).upper()
 
-    resultado = re.search(
+    padroes = [
+
         r"NFE\s*0*(\d+)",
-        texto
-    )
-
-    if resultado:
-
-        return resultado.group(1)
-
-    return None
-
-# ==================================================
-# TRATAR CONTÁBIL
-# ==================================================
-
-def tratar_contabil(arquivo):
-
-    bruto = pd.read_excel(
-        arquivo,
-        header=4
-    )
-
-    bruto.columns = [
-
-        "Data",
-        "Est",
-        "CR",
-        "Historico",
-        "Vazio",
-        "Chave",
-        "Debito",
-        "Credito",
-        "Saldo"
+        r"NFCE\s*0*(\d+)",
+        r"NF-E\s*0*(\d+)",
+        r"NF\s*0*(\d+)",
+        r"\b0*(\d{4,})\b"
 
     ]
 
-    # ==========================================
-    # PEGAR SOMENTE NFE
-    # ==========================================
+    for padrao in padroes:
 
-    bruto = bruto[
-        bruto["Historico"]
-        .astype(str)
-        .str.contains(
-            "NFE",
-            case=False,
-            na=False
+        resultado = re.search(
+            padrao,
+            texto
         )
-    ].copy()
 
-    # ==========================================
-    # EXTRAIR NOTA
-    # ==========================================
+        if resultado:
 
-    bruto["Nota"] = bruto[
-        "Historico"
-    ].apply(extrair_nota)
+            return resultado.group(1).lstrip("0")
 
-    # ==========================================
-    # VALOR
-    # ==========================================
-
-    bruto["Valor Contábil"] = limpar_valor(
-        bruto["Credito"]
-    )
-
-    # ==========================================
-    # DATA
-    # ==========================================
-
-    bruto["Data Contábil"] = pd.to_datetime(
-        bruto["Data"],
-        errors="coerce",
-        dayfirst=True
-    )
-
-    # ==========================================
-    # RESULTADO FINAL
-    # ==========================================
-
-    df = bruto[[
-
-        "Nota",
-        "Valor Contábil",
-        "Data Contábil"
-
-    ]]
-
-    return df
+    return None
 
 # ==================================================
 # TRATAR FISCAL
@@ -140,172 +87,465 @@ def tratar_contabil(arquivo):
 
 def tratar_fiscal(arquivo):
 
-    fiscal = pd.read_excel(arquivo)
+    df = pd.read_excel(arquivo)
 
-    fiscal_final = pd.DataFrame()
+    df.columns = df.columns.astype(str).str.strip()
 
-    fiscal_final["Nota"] = (
+    coluna_nota = None
+    coluna_valor = None
 
-        fiscal["Nr. Inicial"]
+    for col in df.columns:
+
+        c = col.lower()
+
+        if (
+
+            "nota" in c
+            or "numero" in c
+            or "número" in c
+            or "nr" in c
+            or "inicial" in c
+
+        ):
+
+            coluna_nota = col
+
+        elif (
+
+            "valor" in c
+            or "total" in c
+
+        ):
+
+            coluna_valor = col
+
+    if coluna_nota is None:
+
+        st.error(
+            "Não encontrei coluna da nota no Fiscal."
+        )
+
+        st.stop()
+
+    if coluna_valor is None:
+
+        st.error(
+            "Não encontrei coluna de valor no Fiscal."
+        )
+
+        st.stop()
+
+    fiscal = pd.DataFrame()
+
+    fiscal["nota"] = (
+
+        df[coluna_nota]
+
         .astype(str)
+
         .str.extract(r'(\d+)')[0]
+
         .str.lstrip("0")
 
     )
 
-    fiscal_final["Valor Fiscal"] = limpar_valor(
-        fiscal["Valor Total"]
+    fiscal["valor_fiscal"] = limpar_valor(
+        df[coluna_valor]
     )
 
-    fiscal_final["Data Fiscal"] = pd.to_datetime(
-        fiscal["Emissão"],
-        errors="coerce",
-        dayfirst=True
+    fiscal = fiscal.dropna(
+        subset=["nota"]
     )
 
-    return fiscal_final
+    fiscal = fiscal.groupby(
+        "nota",
+        as_index=False
+    ).agg({
+
+        "valor_fiscal": "sum"
+
+    })
+
+    fiscal["valor_fiscal"] = (
+        fiscal["valor_fiscal"]
+        .round(2)
+    )
+
+    return fiscal
+
+# ==================================================
+# TRATAR RAZÃO CONTÁBIL
+# ==================================================
+
+def tratar_razao(arquivo):
+
+    bruto = pd.read_excel(
+        arquivo,
+        header=None
+    )
+
+    # ==========================================
+    # LOCALIZA CABEÇALHO
+    # ==========================================
+
+    header_idx = None
+
+    for i, row in bruto.iterrows():
+
+        linha = [
+
+            str(v).strip().lower()
+
+            for v in row
+
+            if pd.notna(v)
+
+        ]
+
+        if (
+            any("hist" in x for x in linha)
+            and any("cr" in x for x in linha)
+        ):
+
+            header_idx = i
+            break
+
+    if header_idx is None:
+
+        st.error(
+            "Cabeçalho do Razão Contábil não encontrado."
+        )
+
+        st.stop()
+
+    # ==========================================
+    # LÊ PLANILHA
+    # ==========================================
+
+    df = pd.read_excel(
+        arquivo,
+        header=header_idx
+    )
+
+    df.columns = df.columns.astype(str).str.strip()
+
+    # ==========================================
+    # IDENTIFICA COLUNAS
+    # ==========================================
+
+    coluna_historico = None
+    coluna_credito = None
+
+    for col in df.columns:
+
+        c = col.lower()
+
+        if "hist" in c:
+
+            coluna_historico = col
+
+        elif "créd" in c or "cred" in c:
+
+            coluna_credito = col
+
+    # ==========================================
+    # VALIDAÇÕES
+    # ==========================================
+
+    if coluna_historico is None:
+
+        st.error(
+            "Não encontrei coluna Histórico no Razão Contábil."
+        )
+
+        st.stop()
+
+    if coluna_credito is None:
+
+        st.error(
+            "Não encontrei coluna Crédito no Razão Contábil."
+        )
+
+        st.stop()
+
+    st.write(
+        f"📌 Coluna de Crédito utilizada: {coluna_credito}"
+    )
+
+    # ==========================================
+    # EXTRAI NOTA
+    # ==========================================
+
+    df["nota"] = df[
+        coluna_historico
+    ].apply(extrair_nota)
+
+    # remove linhas sem nota
+    df = df[
+        df["nota"].notna()
+    ].copy()
+
+    # ==========================================
+    # VALOR DO CRÉDITO
+    # ==========================================
+
+    df["valor_razao"] = limpar_valor(
+        df[coluna_credito]
+    )
+
+    # remove valores zerados
+    df = df[
+        df["valor_razao"] > 0
+    ].copy()
+
+    # ==========================================
+    # AGRUPA POR NOTA
+    # ==========================================
+
+    razao = df.groupby(
+        "nota",
+        as_index=False
+    ).agg({
+
+        "valor_razao": "sum"
+
+    })
+
+    razao["valor_razao"] = (
+        razao["valor_razao"]
+        .round(2)
+    )
+
+    return razao
+
+# ==================================================
+# COMPARAÇÃO
+# ==================================================
+
+def comparar(fiscal, razao):
+
+    resultado = pd.merge(
+
+        fiscal,
+
+        razao,
+
+        on="nota",
+
+        how="outer",
+
+        indicator=True
+
+    )
+
+    resultado["valor_fiscal"] = (
+        resultado["valor_fiscal"]
+        .fillna(0)
+        .round(2)
+    )
+
+    resultado["valor_razao"] = (
+        resultado["valor_razao"]
+        .fillna(0)
+        .round(2)
+    )
+
+    resultado["diferenca"] = (
+
+        resultado["valor_fiscal"]
+
+        - resultado["valor_razao"]
+
+    ).round(2)
+
+    # ==========================================
+    # STATUS
+    # ==========================================
+
+    def definir_status(row):
+
+        if row["_merge"] == "left_only":
+
+            return "SÓ NO FISCAL"
+
+        elif row["_merge"] == "right_only":
+
+            return "SÓ NO RAZÃO CONTÁBIL"
+
+        elif abs(row["diferenca"]) <= 0.01:
+
+            return "OK"
+
+        else:
+
+            return "VALOR DIFERENTE"
+
+    resultado["status"] = resultado.apply(
+        definir_status,
+        axis=1
+    )
+
+    divergencias = resultado[
+        resultado["status"] != "OK"
+    ].copy()
+
+    divergencias = divergencias.sort_values(
+        by="nota"
+    )
+
+    return divergencias
+
+# ==================================================
+# GERAR EXCEL
+# ==================================================
+
+def gerar_excel(df):
+
+    output = BytesIO()
+
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl"
+    ) as writer:
+
+        df.to_excel(
+            writer,
+            index=False,
+            sheet_name="Divergencias"
+        )
+
+    output.seek(0)
+
+    return output
 
 # ==================================================
 # UPLOAD
 # ==================================================
 
-fiscal = st.file_uploader(
-    "📂 Envie o Fiscal",
+arquivo_fiscal = st.file_uploader(
+
+    "📂 Envie o arquivo Fiscal",
+
     type=["xlsx"]
+
 )
 
-contabil = st.file_uploader(
-    "📂 Envie o Razão Contábil",
+arquivo_razao = st.file_uploader(
+
+    "📂 Envie o arquivo Razão Contábil",
+
     type=["xlsx"]
+
 )
 
 # ==================================================
-# PROCESSAMENTO
+# PROCESSAR
 # ==================================================
 
-if fiscal and contabil:
+if arquivo_fiscal and arquivo_razao:
 
     try:
 
-        # ==========================================
-        # TRATAR BASES
-        # ==========================================
-
-        df_fiscal = tratar_fiscal(fiscal)
-
-        df_contabil = tratar_contabil(contabil)
-
-        # ==========================================
-        # MOSTRAR BASES TRATADAS
-        # ==========================================
-
-        st.subheader("📋 Fiscal Tratado")
-        st.dataframe(df_fiscal.head(20))
-
-        st.subheader("📋 Contábil Tratado")
-        st.dataframe(df_contabil.head(20))
-
-        # ==========================================
-        # COMPARAÇÃO
-        # ==========================================
-
-        comparativo = pd.merge(
-
-            df_fiscal,
-
-            df_contabil,
-
-            on="Nota",
-
-            how="outer",
-
-            indicator=True
-
+        st.info(
+            "🔄 Comparando arquivos..."
         )
 
-        # ==========================================
-        # DIFERENÇA
-        # ==========================================
+        fiscal = tratar_fiscal(
+            arquivo_fiscal
+        )
 
-        comparativo["Diferença"] = (
+        razao = tratar_razao(
+            arquivo_razao
+        )
 
-            comparativo["Valor Contábil"].fillna(0)
+        divergencias = comparar(
+            fiscal,
+            razao
+        )
 
-            - comparativo["Valor Fiscal"].fillna(0)
+        # ======================================
+        # RESUMO
+        # ======================================
 
-        ).round(2)
-
-        # ==========================================
-        # FILTROS
-        # ==========================================
-
-        faltando_fiscal = comparativo[
-            comparativo["_merge"] == "right_only"
-        ]
-
-        faltando_contabil = comparativo[
-            comparativo["_merge"] == "left_only"
-        ]
-
-        valores_diferentes = comparativo[
-            comparativo["Diferença"] != 0
-        ]
-
-        # ==========================================
-        # KPIS
-        # ==========================================
-
-        st.subheader("📈 Indicadores")
+        st.subheader("📈 Resumo")
 
         c1, c2, c3 = st.columns(3)
 
         c1.metric(
-            "Faltando no Fiscal",
-            len(faltando_fiscal)
+
+            "Só no Fiscal",
+
+            len(
+                divergencias[
+                    divergencias["status"]
+                    == "SÓ NO FISCAL"
+                ]
+            )
+
         )
 
         c2.metric(
-            "Faltando no Contábil",
-            len(faltando_contabil)
+
+            "Só no Razão Contábil",
+
+            len(
+                divergencias[
+                    divergencias["status"]
+                    == "SÓ NO RAZÃO CONTÁBIL"
+                ]
+            )
+
         )
 
         c3.metric(
-            "Valores Divergentes",
-            len(valores_diferentes)
+
+            "Valor Diferente",
+
+            len(
+                divergencias[
+                    divergencias["status"]
+                    == "VALOR DIFERENTE"
+                ]
+            )
+
         )
 
-        # ==========================================
-        # RESULTADOS
-        # ==========================================
+        # ======================================
+        # RESULTADO
+        # ======================================
 
-        st.subheader("⚠️ Não Encontradas no Fiscal")
-        st.dataframe(faltando_fiscal)
+        st.subheader(
+            "⚠️ Divergências Encontradas"
+        )
 
-        st.subheader("⚠️ Não Encontradas no Contábil")
-        st.dataframe(faltando_contabil)
+        st.dataframe(
+            divergencias,
+            use_container_width=True
+        )
 
-        st.subheader("💰 Valores Divergentes")
-        st.dataframe(valores_diferentes)
+        # ======================================
+        # DOWNLOAD
+        # ======================================
 
-        # ==========================================
-        # STATUS FINAL
-        # ==========================================
+        excel = gerar_excel(
+            divergencias
+        )
 
-        if (
-            len(faltando_fiscal) == 0
-            and len(faltando_contabil) == 0
-            and len(valores_diferentes) == 0
-        ):
+        st.download_button(
 
-            st.success(
-                "✅ Conciliação realizada com sucesso"
-            )
+            label="📥 Baixar Excel",
 
-        else:
+            data=excel,
 
-            st.error(
-                "⚠️ Existem divergências"
-            )
+            file_name="divergencias.xlsx",
+
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+        )
+
+        st.success(
+            "✅ Comparação finalizada."
+        )
 
     except Exception as erro:
 
@@ -316,5 +556,5 @@ if fiscal and contabil:
 else:
 
     st.info(
-        "📂 Envie os dois arquivos Excel"
+        "📂 Envie os dois arquivos Excel."
     )
